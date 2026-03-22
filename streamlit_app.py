@@ -123,72 +123,104 @@ def log(msg: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# サイドバー: ファイルアップロード & モジュール読み込み
+# 起動時自動読み込み: settings.py / optimizer.py はリポジトリから直接インポート
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _patch_settings_src(src: str) -> str:
+    """get_base_dir() をWeb環境用にパッチする。"""
+    return src.replace(
+        "return Path(sys.executable).parent",
+        "return Path('.')"
+    ).replace(
+        "return Path(__file__).parent",
+        "return Path('.')"
+    )
+
+
+def _auto_load_modules():
+    """
+    同じリポジトリにある settings.py / optimizer.py を起動時に自動読み込みする。
+    すでに読み込み済みならスキップ。
+    """
+    if st.session_state.settings_mod and st.session_state.optimizer_mod:
+        return  # 読み込み済み
+
+    base = Path(__file__).parent
+    s_path = base / "settings.py"
+    o_path = base / "optimizer.py"
+
+    missing = []
+    if not s_path.exists():
+        missing.append("settings.py")
+    if not o_path.exists():
+        missing.append("optimizer.py")
+    if missing:
+        st.error(f"リポジトリに {', '.join(missing)} が見つかりません。GitHubに追加してください。")
+        st.stop()
+
+    try:
+        s_src = _patch_settings_src(s_path.read_text(encoding="utf-8"))
+        o_src = o_path.read_text(encoding="utf-8")
+
+        s_mod = _load_module_from_text("settings",  s_src)
+        o_mod = _load_module_from_text("optimizer", o_src)
+
+        st.session_state.settings_mod  = s_mod
+        st.session_state.optimizer_mod = o_mod
+
+        # input.xlsx がリポジトリにあればデフォルトとして読み込む
+        i_path = base / "input.xlsx"
+        if i_path.exists() and st.session_state.settings_obj is None:
+            data = i_path.read_bytes()
+            st.session_state.input_bytes  = data
+            st.session_state.settings_obj = _load_settings_from_bytes(s_mod, data)
+        elif st.session_state.settings_obj is None:
+            st.session_state.settings_obj = s_mod.Settings()
+
+        log("モジュール自動読み込み完了")
+    except Exception as e:
+        st.error(f"モジュール読み込みエラー: {e}")
+        log(f"モジュール読み込みエラー: {e}")
+        st.stop()
+
+
+_auto_load_modules()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# サイドバー: input.xlsx のアップロードのみ
 # ═══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.title("🛡️ シフト自動生成")
     st.caption("警備員スケジューリング v3.1 Web版")
     st.divider()
 
-    st.subheader("📂 ファイルアップロード")
+    st.subheader("📂 入力ファイル")
+    st.caption("settings.py / optimizer.py はリポジトリから自動読み込みされます")
 
-    settings_file = st.file_uploader("settings.py", type="py", key="up_settings")
-    optimizer_file = st.file_uploader("optimizer.py", type="py", key="up_optimizer")
-    input_xlsx     = st.file_uploader("input.xlsx",   type="xlsx", key="up_input")
+    input_xlsx = st.file_uploader("input.xlsx（希望休・固定シート）", type="xlsx", key="up_input")
 
-    if st.button("⚙️ モジュールを読み込む", use_container_width=True):
-        errors = []
-        if not settings_file:
-            errors.append("settings.py をアップロードしてください")
-        if not optimizer_file:
-            errors.append("optimizer.py をアップロードしてください")
-        if errors:
-            for e in errors:
-                st.error(e)
-        else:
+    if input_xlsx:
+        if st.button("📥 input.xlsx を読み込む", use_container_width=True):
             try:
-                settings_src  = settings_file.read().decode("utf-8")
-                optimizer_src = optimizer_file.read().decode("utf-8")
-
-                # get_base_dir() をWeb環境用にパッチ
-                settings_src = settings_src.replace(
-                    "return Path(sys.executable).parent",
-                    "return Path('.')"
-                ).replace(
-                    "return Path(__file__).parent",
-                    "return Path('.')"
+                data = input_xlsx.read()
+                st.session_state.input_bytes  = data
+                st.session_state.settings_obj = _load_settings_from_bytes(
+                    st.session_state.settings_mod, data
                 )
-
-                s_mod = _load_module_from_text("settings",  settings_src)
-                o_mod = _load_module_from_text("optimizer", optimizer_src)
-
-                st.session_state.settings_mod  = s_mod
-                st.session_state.optimizer_mod = o_mod
-
-                if input_xlsx:
-                    data = input_xlsx.read()
-                    st.session_state.input_bytes = data
-                    st.session_state.settings_obj = s_mod.Settings.load_from_bytes(data) \
-                        if hasattr(s_mod.Settings, "load_from_bytes") \
-                        else _load_settings_from_bytes(s_mod, data)
-                else:
-                    st.session_state.settings_obj = s_mod.Settings()
-
-                log("モジュール読み込み完了")
+                log(f"input.xlsx を読み込みました")
                 st.success("✅ 読み込み完了")
             except Exception as e:
                 st.error(f"読み込みエラー: {e}")
-                log(f"読み込みエラー: {e}")
+                log(f"input.xlsx 読み込みエラー: {e}")
 
     st.divider()
-    if st.session_state.settings_mod:
-        st.success("✅ settings.py 読み込み済み")
+    st.success("✅ settings.py 読み込み済み")
+    st.success("✅ optimizer.py 読み込み済み")
+    if st.session_state.input_bytes:
+        st.success("✅ input.xlsx 読み込み済み")
     else:
-        st.warning("⚠️ settings.py 未読み込み")
-    if st.session_state.optimizer_mod:
-        st.success("✅ optimizer.py 読み込み済み")
-    else:
-        st.warning("⚠️ optimizer.py 未読み込み")
+        st.info("ℹ️ input.xlsx 未読み込み（デフォルト設定で動作）")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
