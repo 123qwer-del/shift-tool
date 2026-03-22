@@ -41,11 +41,67 @@ st.markdown("""
 
 def _load_module_from_text(name: str, source: str):
     """文字列ソースからモジュールを動的ロードする。"""
-    import types, importlib
+    import types
     mod = types.ModuleType(name)
     exec(compile(source, f"<{name}>", "exec"), mod.__dict__)
     sys.modules[name] = mod
     return mod
+
+
+def _load_settings_from_bytes(s_mod, data: bytes):
+    """xlsxバイト列からSettingsを読み込む。"""
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        f.write(data)
+        tmp_path = f.name
+    try:
+        return s_mod.Settings.load(Path(tmp_path))
+    finally:
+        os.unlink(tmp_path)
+
+
+def _load_requests_fixed_from_bytes(data: bytes):
+    """xlsxバイト列から希望休・固定シートを読み込む。"""
+    def _read_sheet(xls, sheet_name):
+        raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+        header_row = 0
+        for idx, row in raw.iterrows():
+            vals = [str(v).strip() for v in row if pd.notna(v)]
+            if "名前" in vals:
+                header_row = idx
+                break
+        return pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
+
+    xls = io.BytesIO(data)
+
+    try:
+        df_req = _read_sheet(xls, "希望休")
+        requests = {}
+        for _, row in df_req.iterrows():
+            if pd.isna(row.get("名前")) or pd.isna(row.get("日")):
+                continue
+            name = str(row["名前"]).strip()
+            day  = int(row["日"])
+            if name and day:
+                requests[(name, day)] = True
+    except Exception:
+        requests = {}
+
+    try:
+        df_fix = _read_sheet(xls, "固定")
+        fixed = {}
+        for _, row in df_fix.iterrows():
+            if pd.isna(row.get("名前")) or pd.isna(row.get("日")) or pd.isna(row.get("シフト")):
+                continue
+            name  = str(row["名前"]).strip()
+            day   = int(row["日"])
+            shift = str(row["シフト"]).strip()
+            if name and day and shift:
+                fixed[(name, day)] = shift
+    except Exception:
+        fixed = {}
+
+    return requests, fixed
 
 
 # ─── セッションステート初期化 ────────────────────────────────────────────────
@@ -133,62 +189,6 @@ with st.sidebar:
         st.success("✅ optimizer.py 読み込み済み")
     else:
         st.warning("⚠️ optimizer.py 未読み込み")
-
-
-def _load_settings_from_bytes(s_mod, data: bytes):
-    """xlsxバイト列からSettingsを読み込む。"""
-    import tempfile, os
-    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
-        f.write(data)
-        tmp_path = f.name
-    try:
-        return s_mod.Settings.load(Path(tmp_path))
-    finally:
-        os.unlink(tmp_path)
-
-
-def _load_requests_fixed_from_bytes(data: bytes):
-    """xlsxバイト列から希望休・固定シートを読み込む。"""
-    def _read_sheet(xls, sheet_name):
-        raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-        header_row = 0
-        for idx, row in raw.iterrows():
-            vals = [str(v).strip() for v in row if pd.notna(v)]
-            if "名前" in vals:
-                header_row = idx
-                break
-        return pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
-
-    xls = io.BytesIO(data)
-
-    try:
-        df_req = _read_sheet(xls, "希望休")
-        requests = {}
-        for _, row in df_req.iterrows():
-            if pd.isna(row.get("名前")) or pd.isna(row.get("日")):
-                continue
-            name = str(row["名前"]).strip()
-            day  = int(row["日"])
-            if name and day:
-                requests[(name, day)] = True
-    except Exception:
-        requests = {}
-
-    try:
-        df_fix = _read_sheet(xls, "固定")
-        fixed = {}
-        for _, row in df_fix.iterrows():
-            if pd.isna(row.get("名前")) or pd.isna(row.get("日")) or pd.isna(row.get("シフト")):
-                continue
-            name  = str(row["名前"]).strip()
-            day   = int(row["日"])
-            shift = str(row["シフト"]).strip()
-            if name and day and shift:
-                fixed[(name, day)] = shift
-    except Exception:
-        fixed = {}
-
-    return requests, fixed
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
