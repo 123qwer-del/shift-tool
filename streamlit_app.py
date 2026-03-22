@@ -318,34 +318,139 @@ with tab_shift:
         )
 
 
-# ─── タブ2: 設定確認 ──────────────────────────────────────────────────────────
+# ─── タブ2: 設定編集 ──────────────────────────────────────────────────────────
 with tab_settings:
-    st.header("現在の設定")
+    st.header("設定編集")
     s = st.session_state.settings_obj
     if s is None:
         st.info("サイドバーからファイルを読み込むと設定が表示されます")
     else:
         col_a, col_b = st.columns(2)
+
+        # ── 左列: 従業員名簿 & 固定ワーカー & シフト種類 ──────────────────────
         with col_a:
             st.subheader("👥 従業員名簿")
-            for i, name in enumerate(s.roster, 1):
-                fw_mark = " ⭐固定" if name == s.fixed_worker else ""
-                st.write(f"{i}. {name}{fw_mark}")
-
-            st.subheader("🔒 シフト種類・勤務時間")
-            sh_df = pd.DataFrame(
-                [(k, v) for k, v in s.shift_hours.items()],
-                columns=["シフト", "時間(h)"]
+            st.caption("1行1名。順番がシフト表の行順になります。")
+            roster_text = st.text_area(
+                label="従業員名簿（1行1名）",
+                value="\n".join(s.roster),
+                height=220,
+                key="edit_roster",
+                label_visibility="collapsed",
             )
-            st.dataframe(sh_df, hide_index=True)
 
+            st.subheader("⭐ 固定ワーカー")
+            st.caption("平日=日勤固定・土日=休日固定にする従業員名（空欄で無効）")
+            fixed_worker_input = st.text_input(
+                label="固定ワーカー名",
+                value=s.fixed_worker or "",
+                key="edit_fixed_worker",
+                label_visibility="collapsed",
+            )
+
+            st.subheader("🕐 シフト種類・勤務時間")
+            st.caption("シフト名と時間(h)を編集できます。「休日」は必須です。")
+            sh_df_edit = pd.DataFrame(
+                [(k, v) for k, v in s.shift_hours.items()],
+                columns=["シフト名", "勤務時間(h)"]
+            )
+            edited_shifts = st.data_editor(
+                sh_df_edit,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="edit_shift_hours",
+                column_config={
+                    "シフト名":    st.column_config.TextColumn("シフト名", required=True),
+                    "勤務時間(h)": st.column_config.NumberColumn("勤務時間(h)", min_value=0, max_value=24, step=1),
+                },
+            )
+
+        # ── 右列: 制約パラメータ ───────────────────────────────────────────────
         with col_b:
             st.subheader("📐 制約パラメータ")
-            c_df = pd.DataFrame(
-                [(k, v) for k, v in s.constraints.items()],
-                columns=["パラメータ", "値"]
+            st.caption("数値を直接クリックして編集できます。")
+
+            CONSTRAINT_DESCRIPTIONS = {
+                "月間上限時間":         "1人あたりの月間最大労働時間 (h)",
+                "日勤必要人数":         "1日に必要な日勤担当者数",
+                "夜勤必要人数":         "1日に必要な夜勤担当者数 (A+B+C の合計)",
+                "最大連続勤務日数":     "連続して勤務できる最大日数",
+                "週休判定ウィンドウ幅": "週1休を判定するスライディングウィンドウの幅 (日)",
+            }
+            c_df_edit = pd.DataFrame([
+                {
+                    "パラメータ名": k,
+                    "値": v,
+                    "説明": CONSTRAINT_DESCRIPTIONS.get(k, ""),
+                }
+                for k, v in s.constraints.items()
+            ])
+            edited_constraints = st.data_editor(
+                c_df_edit,
+                use_container_width=True,
+                key="edit_constraints",
+                disabled=["パラメータ名", "説明"],
+                column_config={
+                    "パラメータ名": st.column_config.TextColumn("パラメータ名"),
+                    "値":           st.column_config.NumberColumn("値", min_value=0, step=1),
+                    "説明":         st.column_config.TextColumn("説明"),
+                },
             )
-            st.dataframe(c_df, hide_index=True)
+
+        st.divider()
+
+        # ── 適用ボタン ─────────────────────────────────────────────────────────
+        if st.button("✅ 設定を適用する", type="primary", use_container_width=True):
+            try:
+                # 名簿パース
+                new_roster = [
+                    name.strip()
+                    for name in roster_text.splitlines()
+                    if name.strip()
+                ]
+                if not new_roster:
+                    st.error("従業員名簿が空です。")
+                    st.stop()
+
+                # シフト時間パース
+                new_shift_hours = {}
+                for _, row in edited_shifts.iterrows():
+                    name_val  = str(row["シフト名"]).strip()
+                    hours_val = int(row["勤務時間(h)"] or 0)
+                    if name_val:
+                        new_shift_hours[name_val] = hours_val
+                if not new_shift_hours:
+                    st.error("シフト種類が空です。")
+                    st.stop()
+                if "休日" not in new_shift_hours:
+                    st.error("「休日」シフトは必須です。")
+                    st.stop()
+
+                # 制約パース
+                new_constraints = {}
+                for _, row in edited_constraints.iterrows():
+                    key = str(row["パラメータ名"]).strip()
+                    val = int(row["値"] or 0)
+                    new_constraints[key] = val
+
+                # Settingsオブジェクトを更新
+                s.roster       = new_roster
+                s.fixed_worker = fixed_worker_input.strip()
+                s.shift_hours  = new_shift_hours
+                s.constraints  = new_constraints
+                st.session_state.settings_obj = s
+
+                # バリデーション
+                errors = s.validate()
+                if errors:
+                    for e in errors:
+                        st.error(e)
+                else:
+                    log("設定を更新しました")
+                    st.success("✅ 設定を適用しました。次回のシフト生成から反映されます。")
+
+            except Exception as e:
+                st.error(f"設定の適用に失敗しました: {e}")
 
 
 # ─── タブ3: ログ ──────────────────────────────────────────────────────────────
