@@ -272,6 +272,7 @@ def generate_shift(
     roster: Optional[List[str]] = None,
     solver_time_limit: float = 60.0,
     solver_workers: int = 4,
+    settings: Optional[Dict] = None,  # 後方互換性のため追加（非推奨）
 ) -> pd.DataFrame:
     """
     警備員シフトスケジュールを最適化して返す。
@@ -307,6 +308,16 @@ def generate_shift(
     RuntimeError
         ソルバーが解を見つけられなかった場合
     """
+    # ================================================================
+    # settings パラメータの処理（後方互換性）
+    # ================================================================
+    if settings is not None:
+        # settings から個別パラメータを上書き（存在する場合のみ）
+        solver_time_limit = settings.get('solver_time_limit', solver_time_limit)
+        solver_workers = settings.get('solver_workers', solver_workers)
+        if 'roster' in settings and roster is None:
+            roster = settings['roster']
+    
     # [修正1] roster の解決
     roster = list(roster) if roster is not None else list(WORKER_ROSTER)
 
