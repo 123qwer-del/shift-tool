@@ -312,11 +312,16 @@ def generate_shift(
     # settings パラメータの処理（後方互換性）
     # ================================================================
     if settings is not None:
-        # settings から個別パラメータを上書き（存在する場合のみ）
-        solver_time_limit = settings.get('solver_time_limit', solver_time_limit)
-        solver_workers = settings.get('solver_workers', solver_workers)
-        if 'roster' in settings and roster is None:
-            roster = settings['roster']
+        if isinstance(settings, dict):
+            # 辞書形式（旧仕様）
+            solver_time_limit = settings.get('solver_time_limit', solver_time_limit)
+            solver_workers = settings.get('solver_workers', solver_workers)
+            if 'roster' in settings and roster is None:
+                roster = settings['roster']
+        else:
+            # Settingsオブジェクト形式（streamlit_app.py から渡される）
+            if roster is None and hasattr(settings, 'roster'):
+                roster = settings.roster
     
     # [修正1] roster の解決
     roster = list(roster) if roster is not None else list(WORKER_ROSTER)
