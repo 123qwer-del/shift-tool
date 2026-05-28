@@ -322,7 +322,9 @@ with tab_shift:
             color = SHIFT_COLORS.get(str(val), "#374151")
             return f"background-color: {color}; color: white; text-align: center; font-size: 11px;"
 
-        styled = df.style.applymap(color_shift)
+        # pandas 2.1+ では applymap が廃止され map に変更
+        _styler = df.style.map if hasattr(df.style, "map") else df.style.applymap
+        styled = _styler(color_shift)
         st.dataframe(styled, use_container_width=True)
 
         # サマリー
