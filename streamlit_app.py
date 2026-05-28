@@ -116,6 +116,7 @@ for key, default in {
     "last_month":      None,
     "last_requests":   None,
     "last_file_fixed": None,
+    "prev_month_tail": None,   # 前月末6日分のシフト引き継ぎ用
     "log_lines":       [],
 }.items():
     if key not in st.session_state:
@@ -189,6 +190,19 @@ def _auto_load_modules():
         st.stop()
 
 
+def _extract_prev_month_tail(data: bytes, tail_days: int = 6) -> dict:
+    """
+    前月の出力 Excel から末 tail_days 日分を抽出して
+    { 従業員名: [シフト, ..., シフト] } を返す。
+    インデックス 0 = 前月最終日の tail_days 日前、-1 = 前月最終日。
+    """
+    buf = io.BytesIO(data)
+    df  = pd.read_excel(buf, index_col=0)
+    df.columns = [int(c) for c in df.columns]
+    tail_cols  = sorted(df.columns)[-tail_days:]
+    return {name: [str(df.loc[name, c]) for c in tail_cols] for name in df.index}
+
+
 _auto_load_modules()
 
 
@@ -197,7 +211,7 @@ _auto_load_modules()
 # ═══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.title("🛡️ シフト自動生成")
-    st.caption("警備員スケジューリング v3.2 Web版")
+    st.caption("警備員スケジューリング v3.3 Web版")
     st.divider()
 
     st.subheader("📂 入力ファイル")
@@ -213,11 +227,46 @@ with st.sidebar:
                 st.session_state.settings_obj = _load_settings_from_bytes(
                     st.session_state.settings_mod, data
                 )
-                log(f"input.xlsx を読み込みました")
+                log("input.xlsx を読み込みました")
                 st.success("✅ 読み込み完了")
             except Exception as e:
                 st.error(f"読み込みエラー: {e}")
                 log(f"input.xlsx 読み込みエラー: {e}")
+
+    st.divider()
+
+    # ── 前月シフト引き継ぎ ────────────────────────────────────────────────────
+    st.subheader("📅 前月シフト引き継ぎ（任意）")
+    st.caption("前月の出力 Excel をアップロードすると月初の制約が正確になります")
+
+    prev_xlsx = st.file_uploader(
+        "前月シフト Excel（output_shift_YYYYMM.xlsx）",
+        type="xlsx",
+        key="up_prev",
+    )
+    if prev_xlsx:
+        if st.button("📥 前月シフトを読み込む", use_container_width=True):
+            try:
+                prev_data = prev_xlsx.read()
+                tail = _extract_prev_month_tail(prev_data, tail_days=6)
+                st.session_state.prev_month_tail = tail
+                log(f"前月シフト読み込み完了: {len(tail)}名 x 末6日")
+                st.success(f"✅ {len(tail)}名分の末6日を読み込みました")
+                with st.expander("前月末シフト プレビュー"):
+                    prev_df = pd.DataFrame(tail).T
+                    prev_df.columns = [f"末{6-i}日前" for i in range(6)]
+                    st.dataframe(prev_df, use_container_width=True)
+            except Exception as e:
+                st.error(f"読み込みエラー: {e}")
+                log(f"前月シフト読み込みエラー: {e}")
+
+    if st.session_state.prev_month_tail:
+        st.success("✅ 前月シフト読み込み済み")
+        if st.button("🗑️ 前月シフトをクリア", use_container_width=True):
+            st.session_state.prev_month_tail = None
+            st.rerun()
+    else:
+        st.info("ℹ️ 前月シフト未設定（月初制約は独立して計算）")
 
     st.divider()
     st.success("✅ settings.py 読み込み済み")
@@ -289,16 +338,20 @@ with tab_shift:
 
         # GUIからの希望休をマージ（上書き優先）
         merged_requests = {**file_requests, **req_data}
+        prev_tail = st.session_state.prev_month_tail
 
         with st.spinner("CP-SATソルバーで最適化中..."):
             try:
                 log(f"最適化開始: {year}年{month}月")
                 log(f"希望休: {len(merged_requests)}件  固定: {len(file_fixed)}件")
+                if prev_tail:
+                    log(f"前月末シフト引き継ぎ: {len(prev_tail)}名分")
 
                 df = o_mod.generate_shift(
                     int(year), int(month),
                     merged_requests, file_fixed,
                     settings=s_obj,
+                    prev_month_tail=prev_tail,
                 )
                 st.session_state.result_df       = df
                 st.session_state.result_df_orig  = df.copy()
