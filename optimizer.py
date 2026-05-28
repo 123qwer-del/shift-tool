@@ -1,5 +1,5 @@
 """
-警備員シフト最適化エンジン  v3.1
+警備員シフト最適化エンジン  v3.3
 =================================
 OR-Tools CP-SAT を使用した9名の警備員シフトスケジューリング
 
@@ -17,6 +17,13 @@ OR-Tools CP-SAT を使用した9名の警備員シフトスケジューリング
         [5] 月間上限176h維持（平均180h/人のためソルバーが不均等配分で対処）
   v3.1  [1] 実労働時間の定義を修正（夜勤A: 11h→9h, 夜勤B: 10h→8h, 夜勤C: 11h→9h）
         [2] 176h上限で全12ヶ月が実現可能に（最大162.8h/人、余裕13.2h）
+  v3.2  [1] get_role_counts() の統計偏り計算から FIXED_WORKER を除外
+           （末吉は夜勤0回固定のため含めると偏り指標が歪んでいた）
+  v3.3  [1] prev_month_tail パラメータを追加（前月末シフト引き継ぎ）
+           - C4（夜勤翌日日勤禁止）を月跨ぎで適用
+           - C5（連続勤務4日以内）を月跨ぎで適用
+           - C6（週1休）を月跨ぎで適用
+           前月末6日分のシフトを渡すことで月初の制約が正確になる
 
 インストール要件:
     pip install ortools pandas
@@ -272,7 +279,8 @@ def generate_shift(
     roster: Optional[List[str]] = None,
     solver_time_limit: float = 60.0,
     solver_workers: int = 4,
-    settings: Optional[Dict] = None,  # 後方互換性のため追加（非推奨）
+    settings: Optional[Dict] = None,
+    prev_month_tail: Optional[Dict[str, List[str]]] = None,
 ) -> pd.DataFrame:
     """
     警備員シフトスケジュールを最適化して返す。
@@ -289,12 +297,14 @@ def generate_shift(
         { (名前, 日): "日勤" など }  固定セル（変更不可）
     roster : list[str], optional
         従業員リスト。省略時はモジュール定数 WORKER_ROSTER を使用。
-        末吉 弘一（FIXED_WORKER）はシフト対象外で平日日勤固定・土日休日固定。
-        日勤2名・夜勤A/B/C各1名はすべて残り8名の shift_workers から充填する。
     solver_time_limit : float
         ソルバー最大実行時間（秒）デフォルト60秒
     solver_workers : int
         ソルバー並列スレッド数
+    prev_month_tail : dict[str, list[str]], optional
+        前月末6日分のシフト履歴。月跨ぎ制約（C4/C5/C6）に使用。
+        { 従業員名: [day-5, day-4, day-3, day-2, day-1, last_day] }
+        ※ リストは前月末日に近い順（インデックス5が前月最終日）
 
     Returns
     -------
@@ -304,7 +314,7 @@ def generate_shift(
     Raises
     ------
     ShiftValidationError
-        入力に矛盾が検出された場合（solve前に送出）[修正6]
+        入力に矛盾が検出された場合（solve前に送出）
     RuntimeError
         ソルバーが解を見つけられなかった場合
     """
@@ -416,6 +426,16 @@ def generate_shift(
             for si_n in night_sis:
                 model.Add(x[wi, nd, si_day] == 0).OnlyEnforceIf(x[wi, d, si_n])
 
+    # ---- C4 月跨ぎ: 前月最終日が夜勤 → 1日目の日勤を禁止 ----
+    if prev_month_tail:
+        for wi, worker in enumerate(shift_workers):
+            tail = prev_month_tail.get(worker)
+            if not tail:
+                continue
+            last_shift = tail[-1]   # 前月最終日のシフト
+            if last_shift in NIGHT_SHIFTS:
+                model.Add(x[wi, 1, si_day] == 0)
+
     # ================================================================
     # 制約 C5: 連続勤務4日以内
     # ================================================================
@@ -432,14 +452,38 @@ def generate_shift(
                 <= MAX_CONSECUTIVE
             )
 
+    # ---- C5 月跨ぎ: 前月末の連続勤務を引き継いで月初に上限を設ける ----
+    # tail[-k:] + 新月[1..k-1] の5日窓 (k=1..4) を確認する
+    if prev_month_tail:
+        for wi, worker in enumerate(shift_workers):
+            tail = prev_month_tail.get(worker)
+            if not tail:
+                continue
+            padded = list(tail)
+            # 長さ不足なら先頭を "休日" で埋める
+            while len(padded) < MAX_CONSECUTIVE:
+                padded.insert(0, "休日")
+            # 前月末 k 日 (k=1..MAX_CONSECUTIVE) を使う窓
+            for k in range(1, MAX_CONSECUTIVE + 1):
+                prev_slice  = padded[-k:]           # 前月末 k 日
+                new_day_cnt = MAX_CONSECUTIVE + 1 - k  # 新月側の日数
+                new_days_in_window = days[:new_day_cnt]
+                prev_work = sum(1 for s in prev_slice if s != "休日")
+                remaining = MAX_CONSECUTIVE - prev_work
+                if remaining < new_day_cnt:
+                    # 新月側で働ける上限を制約
+                    model.Add(
+                        sum(
+                            x[wi, d, si]
+                            for d in new_days_in_window
+                            for si in range(num_shifts)
+                            if SHIFT_TYPES[si] != "休日"
+                        )
+                        <= max(remaining, 0)
+                    )
+
     # ================================================================
-    # 制約 C6: 週1休 — 7日スライディングウィンドウ  [修正3]
-    #
-    # 旧実装（カレンダー週ブロック）との違い:
-    #   旧: 月曜〜日曜の暦週ブロック内で休日≥1
-    #       → 月初が木曜始まりなら最初のブロックは木〜日の4日のみ
-    #   新: 任意の連続7日間で必ず休日≥1
-    #       → 月中どの7日区間を取っても休みがあることを保証
+    # 制約 C6: 週1休 — 7日スライディングウィンドウ
     # ================================================================
     for wi in range(num_workers):
         for di in range(len(days) - SLIDING_WINDOW + 1):
@@ -447,6 +491,27 @@ def generate_shift(
             model.Add(
                 sum(x[wi, d, si_rest] for d in window_7) >= 1
             )
+
+    # ---- C6 月跨ぎ: 前月末 k 日 + 新月 (7-k) 日の窓で休日 >= 1 ----
+    if prev_month_tail:
+        for wi, worker in enumerate(shift_workers):
+            tail = prev_month_tail.get(worker)
+            if not tail:
+                continue
+            padded = list(tail)
+            while len(padded) < SLIDING_WINDOW - 1:
+                padded.insert(0, "休日")
+            # k = 前月側の日数 (1..6)
+            for k in range(1, SLIDING_WINDOW):
+                prev_slice  = padded[-k:]
+                new_day_cnt = SLIDING_WINDOW - k
+                new_days_in_window = days[:new_day_cnt]
+                prev_rest = sum(1 for s in prev_slice if s == "休日")
+                if prev_rest == 0:
+                    # 新月側の窓に必ず1日以上の休日を要求
+                    model.Add(
+                        sum(x[wi, d, si_rest] for d in new_days_in_window) >= 1
+                    )
 
     # ================================================================
     # 制約 C7: 希望休は必ず休日
@@ -643,11 +708,15 @@ def get_role_counts(df: pd.DataFrame) -> pd.DataFrame:
 
     rc = pd.DataFrame(records).set_index("名前")
 
-    # 統計行（末吉など固定従業員を除いた数値列のみ集計）
+    # 統計行: FIXED_WORKER(末吉)はシフト対象外のため偏り計算から除外する
+    # 末吉は平日日勤固定で夜勤回数が常に0のため、含めると偏り指標が歪む
+    shift_worker_names = [n for n in rc.index if n != FIXED_WORKER]
+    rc_shift = rc.loc[shift_worker_names] if shift_worker_names else rc
+
     numeric_cols = ["日勤", "夜勤A", "夜勤B", "夜勤C", "夜勤計", "休日", "労働時間(h)"]
     stats = {}
     for col in numeric_cols:
-        vals = rc[col]
+        vals = rc_shift[col]
         stats[col] = {
             "合計":          int(vals.sum()),
             "最大":          int(vals.max()),
