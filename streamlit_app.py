@@ -316,12 +316,18 @@ with tab_shift:
 
     # ─── 結果表示・手動修整 ───────────────────────────────────────────────────
     if st.session_state.result_df is not None:
-        df_orig = st.session_state.result_df_orig
-        df_cur  = st.session_state.result_df
+        # data_editor は列名を文字列として返すため、orig/cur ともに列名を文字列に統一する
+        def _normalize_cols(df):
+            df = df.copy()
+            df.columns = [str(c) for c in df.columns]
+            return df
+
+        df_orig = _normalize_cols(st.session_state.result_df_orig)
+        df_cur  = _normalize_cols(st.session_state.result_df)
 
         SHIFT_TYPES_OPTIONS = ["日勤", "夜勤A", "夜勤B", "夜勤C", "休日"]
 
-        # 手動修整の差分を検出
+        # 手動修整の差分を検出（列名はすでに文字列で統一済み）
         def _get_manual_edits(orig, cur):
             fixed_worker = getattr(
                 st.session_state.optimizer_mod, "FIXED_WORKER", "末吉 弘一"
@@ -330,7 +336,7 @@ with tab_shift:
             for name in orig.index:
                 if name == fixed_worker:
                     continue
-                for col in orig.columns:
+                for col in orig.columns:          # col は文字列 "1"〜"31"
                     if str(orig.loc[name, col]) != str(cur.loc[name, col]):
                         edits[(name, int(col))] = str(cur.loc[name, col])
             return edits
@@ -382,8 +388,12 @@ with tab_shift:
         )
 
         # 変更があればセッションに反映してすぐ再描画
+        # edited_df の列名も文字列になっているので正規化済み df_cur と比較
         if not edited_df.equals(df_cur):
-            st.session_state.result_df = edited_df
+            # 元の列名（numpy.int64 など）に戻してセッションに保存する
+            restored = edited_df.copy()
+            restored.columns = st.session_state.result_df_orig.columns
+            st.session_state.result_df = restored
             st.rerun()
 
         # 修整セル一覧（折りたたみ）
@@ -393,7 +403,7 @@ with tab_shift:
                     {
                         "名前": name,
                         "日": day,
-                        "変更前": df_orig.loc[name, day],
+                        "変更前": df_orig.loc[name, str(day)],
                         "変更後": shift,
                     }
                     for (name, day), shift in sorted(
