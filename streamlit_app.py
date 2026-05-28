@@ -110,12 +110,12 @@ for key, default in {
     "optimizer_mod":   None,
     "settings_obj":    None,
     "input_bytes":     None,
-    "result_df":       None,   # 現在表示中のシフト表（手動修整後も含む）
-    "result_df_orig":  None,   # 直前の自動生成結果（手動修整前の原本）
-    "last_year":       None,   # 直前の生成に使った年
-    "last_month":      None,   # 直前の生成に使った月
-    "last_requests":   None,   # 直前の生成に使った希望休
-    "last_file_fixed": None,   # 直前の生成に使ったファイル固定セル
+    "result_df":       None,
+    "result_df_orig":  None,
+    "last_year":       None,
+    "last_month":      None,
+    "last_requests":   None,
+    "last_file_fixed": None,
     "log_lines":       [],
 }.items():
     if key not in st.session_state:
@@ -300,11 +300,11 @@ with tab_shift:
                     merged_requests, file_fixed,
                     settings=s_obj,
                 )
-                st.session_state.result_df      = df
-                st.session_state.result_df_orig = df.copy()   # 手動修整リセット用の原本
-                st.session_state.last_year      = int(year)
-                st.session_state.last_month     = int(month)
-                st.session_state.last_requests  = merged_requests
+                st.session_state.result_df       = df
+                st.session_state.result_df_orig  = df.copy()
+                st.session_state.last_year       = int(year)
+                st.session_state.last_month      = int(month)
+                st.session_state.last_requests   = merged_requests
                 st.session_state.last_file_fixed = file_fixed
                 log("最適化完了")
                 st.success("✅ シフト生成完了！")
@@ -320,39 +320,25 @@ with tab_shift:
         df_cur  = st.session_state.result_df
 
         SHIFT_TYPES_OPTIONS = ["日勤", "夜勤A", "夜勤B", "夜勤C", "休日"]
-        SHIFT_COLORS = {
-            "日勤":  "#1e40af",
-            "夜勤A": "#6d28d9",
-            "夜勤B": "#7c3aed",
-            "夜勤C": "#8b5cf6",
-            "休日":  "#374151",
-        }
 
-        def color_shift(val):
-            color = SHIFT_COLORS.get(str(val), "#374151")
-            return f"background-color:{color}; color:white; text-align:center; font-size:11px;"
-
-        # ── 手動修整の差分を検出 ──────────────────────────────────────────────
-        def _get_manual_edits(orig: pd.DataFrame, cur: pd.DataFrame):
-            """orig と cur を比較し変更セルを {(名前, 日): シフト} で返す。"""
-            edits = {}
+        # 手動修整の差分を検出
+        def _get_manual_edits(orig, cur):
             fixed_worker = getattr(
                 st.session_state.optimizer_mod, "FIXED_WORKER", "末吉 弘一"
             )
+            edits = {}
             for name in orig.index:
                 if name == fixed_worker:
-                    continue  # 固定ワーカーは手動固定の対象外
+                    continue
                 for col in orig.columns:
-                    o_val = str(orig.loc[name, col])
-                    c_val = str(cur.loc[name, col])
-                    if o_val != c_val:
-                        edits[(name, int(col))] = c_val
+                    if str(orig.loc[name, col]) != str(cur.loc[name, col]):
+                        edits[(name, int(col))] = str(cur.loc[name, col])
             return edits
 
         manual_edits = _get_manual_edits(df_orig, df_cur)
         n_edits = len(manual_edits)
 
-        # ── ヘッダー行: タイトル + 修整カウント ───────────────────────────────
+        # ヘッダー + 修整カウントバッジ
         hcol1, hcol2 = st.columns([3, 1])
         with hcol1:
             st.subheader("📊 生成結果（セルを直接クリックして編集できます）")
@@ -372,9 +358,8 @@ with tab_shift:
                     unsafe_allow_html=True,
                 )
 
-        # ── 編集可能テーブル ──────────────────────────────────────────────────
-        # 列ごとに SelectboxColumn を設定（全日付列）
-        day_cols = {
+        # 編集可能テーブル（日付列をドロップダウンに）
+        day_col_cfg = {
             str(c): st.column_config.SelectboxColumn(
                 label=str(c),
                 options=SHIFT_TYPES_OPTIONS,
@@ -383,12 +368,10 @@ with tab_shift:
             )
             for c in df_cur.columns
         }
-        # 名前列は編集不可
-        col_cfg = {"名前": st.column_config.TextColumn("名前", disabled=True), **day_cols}
-
-        # 固定ワーカーの行を視覚的に強調するため style 適用
-        _styler_fn = df_cur.style.map if hasattr(df_cur.style, "map") else df_cur.style.applymap
-        styled_df = _styler_fn(color_shift)
+        col_cfg = {
+            "名前": st.column_config.TextColumn("名前", disabled=True),
+            **day_col_cfg,
+        }
 
         edited_df = st.data_editor(
             df_cur,
@@ -398,27 +381,35 @@ with tab_shift:
             hide_index=False,
         )
 
-        # data_editor の返値で result_df を更新（差分バッジをリアルタイム反映）
-        # 値が変わっていたら session_state を更新して再描画
+        # 変更があればセッションに反映してすぐ再描画
         if not edited_df.equals(df_cur):
             st.session_state.result_df = edited_df
             st.rerun()
 
-        # ── 修整セル一覧 ─────────────────────────────────────────────────────
+        # 修整セル一覧（折りたたみ）
         if n_edits > 0:
             with st.expander(f"✏️ 手動修整セル一覧（{n_edits}件）"):
                 edit_records = [
-                    {"名前": name, "日": day,
-                     "変更前": df_orig.loc[name, day],
-                     "変更後": shift}
-                    for (name, day), shift in sorted(manual_edits.items(), key=lambda x: (x[0][0], x[0][1]))
+                    {
+                        "名前": name,
+                        "日": day,
+                        "変更前": df_orig.loc[name, day],
+                        "変更後": shift,
+                    }
+                    for (name, day), shift in sorted(
+                        manual_edits.items(), key=lambda x: (x[0][0], x[0][1])
+                    )
                 ]
-                st.dataframe(pd.DataFrame(edit_records), use_container_width=True, hide_index=True)
+                st.dataframe(
+                    pd.DataFrame(edit_records),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
-        # ── アクションボタン行 ────────────────────────────────────────────────
-        btn_col1, btn_col2, btn_col3 = st.columns([2, 1, 1])
+        # アクションボタン行
+        btn1, btn2, btn3 = st.columns([2, 1, 1])
 
-        with btn_col1:
+        with btn1:
             recalc_disabled = (
                 n_edits == 0
                 or st.session_state.last_year is None
@@ -430,56 +421,58 @@ with tab_shift:
                 type="primary",
                 use_container_width=True,
             ):
-                o_mod   = st.session_state.optimizer_mod
-                s_obj   = st.session_state.settings_obj or st.session_state.settings_mod.Settings()
-                y       = st.session_state.last_year
-                m       = st.session_state.last_month
-                reqs    = st.session_state.last_requests or {}
-                # ファイル固定 + 手動修整 をマージ（手動修整が優先）
-                merged_fixed = {**(st.session_state.last_file_fixed or {}), **manual_edits}
-
-                with st.spinner(f"手動修整を固定して再最適化中（{len(manual_edits)}セル固定）..."):
+                o_mod  = st.session_state.optimizer_mod
+                s_obj  = st.session_state.settings_obj or st.session_state.settings_mod.Settings()
+                y      = st.session_state.last_year
+                m      = st.session_state.last_month
+                reqs   = st.session_state.last_requests or {}
+                merged_fixed = {
+                    **(st.session_state.last_file_fixed or {}),
+                    **manual_edits,
+                }
+                with st.spinner(f"手動修整を固定して再最適化中（{n_edits}セル固定）..."):
                     try:
-                        log(f"手動修整反映 再計算: {y}年{m}月  固定セル={len(merged_fixed)}件")
+                        log(f"再計算: {y}年{m}月  固定セル={len(merged_fixed)}件")
                         new_df = o_mod.generate_shift(
                             y, m, reqs, merged_fixed, settings=s_obj,
                         )
-                        st.session_state.result_df      = new_df
-                        st.session_state.result_df_orig = new_df.copy()
+                        st.session_state.result_df       = new_df
+                        st.session_state.result_df_orig  = new_df.copy()
                         st.session_state.last_file_fixed = merged_fixed
                         log("再計算完了")
-                        st.success("✅ 再計算完了！手動修整セルを固定した最適解が得られました。")
+                        st.success("✅ 再計算完了！")
                         st.rerun()
                     except Exception as e:
                         err_type = type(e).__name__
-                        msg = str(e)
-                        st.error(f"**{err_type}**\n\n{msg}")
-                        log(f"再計算エラー: {err_type}: {msg}")
+                        st.error(f"**{err_type}**\n\n{e}")
+                        log(f"再計算エラー: {err_type}: {e}")
 
-        with btn_col2:
+        with btn2:
             if st.button(
                 "↩️ 修整をリセット",
                 disabled=(n_edits == 0),
                 use_container_width=True,
             ):
                 st.session_state.result_df = st.session_state.result_df_orig.copy()
-                log("手動修整をリセットしました")
+                log("手動修整をリセット")
                 st.rerun()
 
-        with btn_col3:
+        with btn3:
             buf = io.BytesIO()
             df_cur.to_excel(buf, index=True)
+            lm = st.session_state.last_month or 1
+            ly = st.session_state.last_year or 2025
             st.download_button(
                 label="⬇️ Excel出力",
                 data=buf.getvalue(),
-                file_name=f"shift_{st.session_state.last_year}{st.session_state.last_month:02d}.xlsx",
+                file_name=f"shift_{ly}{lm:02d}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
 
         st.divider()
 
-        # ── サマリー ──────────────────────────────────────────────────────────
+        # サマリー
         if hasattr(st.session_state.optimizer_mod, "get_role_counts"):
             try:
                 rc, stats_df = st.session_state.optimizer_mod.get_role_counts(df_cur)
@@ -547,4 +540,89 @@ with tab_settings:
                 "月間上限時間":         "1人あたりの月間最大労働時間 (h)",
                 "日勤必要人数":         "1日に必要な日勤担当者数",
                 "夜勤必要人数":         "1日に必要な夜勤担当者数 (A+B+C の合計)",
-                "最大連続勤務日数":     
+                "最大連続勤務日数":     "連続して勤務できる最大日数",
+                "週休判定ウィンドウ幅": "週1休を判定するスライディングウィンドウの幅 (日)",
+            }
+            c_df_edit = pd.DataFrame([
+                {
+                    "パラメータ名": k,
+                    "値": v,
+                    "説明": CONSTRAINT_DESCRIPTIONS.get(k, ""),
+                }
+                for k, v in s.constraints.items()
+            ])
+            edited_constraints = st.data_editor(
+                c_df_edit,
+                use_container_width=True,
+                key="edit_constraints",
+                disabled=["パラメータ名", "説明"],
+                column_config={
+                    "パラメータ名": st.column_config.TextColumn("パラメータ名"),
+                    "値":           st.column_config.NumberColumn("値", min_value=0, step=1),
+                    "説明":         st.column_config.TextColumn("説明"),
+                },
+            )
+
+        st.divider()
+
+        # ── 適用ボタン ─────────────────────────────────────────────────────────
+        if st.button("✅ 設定を適用する", type="primary", use_container_width=True):
+            try:
+                # 名簿パース
+                new_roster = [
+                    name.strip()
+                    for name in roster_text.splitlines()
+                    if name.strip()
+                ]
+                if not new_roster:
+                    st.error("従業員名簿が空です。")
+                    st.stop()
+
+                # シフト時間パース
+                new_shift_hours = {}
+                for _, row in edited_shifts.iterrows():
+                    name_val  = str(row["シフト名"]).strip()
+                    hours_val = int(row["勤務時間(h)"] or 0)
+                    if name_val:
+                        new_shift_hours[name_val] = hours_val
+                if not new_shift_hours:
+                    st.error("シフト種類が空です。")
+                    st.stop()
+                if "休日" not in new_shift_hours:
+                    st.error("「休日」シフトは必須です。")
+                    st.stop()
+
+                # 制約パース
+                new_constraints = {}
+                for _, row in edited_constraints.iterrows():
+                    key = str(row["パラメータ名"]).strip()
+                    val = int(row["値"] or 0)
+                    new_constraints[key] = val
+
+                # Settingsオブジェクトを更新
+                s.roster       = new_roster
+                s.fixed_worker = fixed_worker_input.strip()
+                s.shift_hours  = new_shift_hours
+                s.constraints  = new_constraints
+                st.session_state.settings_obj = s
+
+                # バリデーション
+                errors = s.validate()
+                if errors:
+                    for e in errors:
+                        st.error(e)
+                else:
+                    log("設定を更新しました")
+                    st.success("✅ 設定を適用しました。次回のシフト生成から反映されます。")
+
+            except Exception as e:
+                st.error(f"設定の適用に失敗しました: {e}")
+
+
+# ─── タブ3: ログ ──────────────────────────────────────────────────────────────
+with tab_log:
+    st.header("実行ログ")
+    if st.button("🗑️ ログをクリア"):
+        st.session_state.log_lines = []
+    log_text = "\n".join(st.session_state.log_lines) or "（ログなし）"
+    st.code(log_text, language=None)
