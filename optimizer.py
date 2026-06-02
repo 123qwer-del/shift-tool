@@ -239,4 +239,7 @@ class ShiftOptimizer:
                         if solver.Value(x[w, d, s]) == 1:
                             assigned_shift = s
                             break
-                    result_schedule[(w,
+                    result_schedule[(w, d)] = assigned_shift
+            return status_str, result_schedule
+        else:
+            return "INFEASIBLE", {}
