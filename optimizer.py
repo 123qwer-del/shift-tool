@@ -1,5 +1,5 @@
 """
-警備員シフト最適化エンジン  v4.3 (前月連動エラー修正版)
+警備員シフト最適化エンジン  v4.4 (DataFrame出力対応版)
 =================================================
 OR-Tools CP-SAT を使用した警備員シフトスケジューリング
 
@@ -8,13 +8,10 @@ OR-Tools CP-SAT を使用した警備員シフトスケジューリング
      - 平日: 隊長日勤x1, 日勤Ax1, 日勤Bx1, Ax1, 9Bx1, Cx1
      - 土日: 日勤Ax1, 日勤Bx1, Ax1, 9Bx1, Cx1 (隊長は自動で公休「○」)
   2. 月の最終日に応じて、全一般スタッフの月間総労働時間を「ぴったり規定時間」に調整
-     - 31日の月：176時間 (勤務22日×8h相当)
-     - 30日の月：168時間 (勤務21日×8h相当)
-     - 28日の月：160時間 (勤務20日×8h相当)
-     ※夜勤(9h)と日勤(8h)と公休(0h)の日数バランスをソルバーが自動調整します。
 """
 
 import calendar
+import pandas as pd
 from typing import Dict, List, Tuple, Any, Optional
 from ortools.sat.python import cp_model
 
@@ -29,10 +26,11 @@ def generate_shift(
     holiday_requests: Dict[Tuple[str, int], bool],
     fixed_assignments: Dict[Tuple[str, int], str],
     settings: Any,
-    prev_month_tail: Optional[Dict[str, List[str]]] = None  # ← ★ 画面側から渡される前月末のシフトデータを安全に受け取ります
-) -> Tuple[str, Dict[Tuple[str, int], str]]:
+    prev_month_tail: Optional[Dict[str, List[str]]] = None
+) -> pd.DataFrame:
     """
-    [最重要] streamlit_app.py から直接呼び出されるエントリーポイント関数。
+    [最重要] streamlit_app.py から呼び出される関数。
+    ソルバーの計算結果をPandas DataFrame（表データ）に変換して返します。
     """
     optimizer = ShiftOptimizer(
         year=year,
@@ -43,7 +41,19 @@ def generate_shift(
         constraints=settings.constraints,
         prev_month_tail=prev_month_tail
     )
-    return optimizer.solve(holiday_requests, fixed_assignments)
+    status, schedule = optimizer.solve(holiday_requests, fixed_assignments)
+
+    # 物理的にシフトが組めない条件だった場合のエラーハンドリング
+    if status == "INFEASIBLE" or not schedule:
+        raise Exception("条件が厳しすぎるため、シフトを作成できませんでした（解なし）。固定シフトの矛盾や、休み希望が多すぎないか確認してください。")
+
+    # 成功した場合、結果を表（DataFrame）に変換
+    df = pd.DataFrame(index=settings.roster, columns=list(range(1, optimizer.num_days + 1)))
+    for w in settings.roster:
+        for d in range(1, optimizer.num_days + 1):
+            df.loc[w, d] = schedule.get((w, d), "○")
+            
+    return df
 
 
 class ShiftOptimizer:
@@ -80,7 +90,7 @@ class ShiftOptimizer:
         # シフト対象ワーカー（末吉さんを除く8名）
         self.shift_workers = [w for w in self.roster if w != self.fixed_worker]
 
-        # 月の規定労働時間の自動決定（定義ファイル.xlsx に準拠）
+        # 月の規定労働時間の自動決定
         if self.num_days == 31:
             self.target_hours = 176
         elif self.num_days == 30:
@@ -95,7 +105,6 @@ class ShiftOptimizer:
 
     def validate_inputs(self, holiday_requests: Dict[Tuple[str, int], bool], fixed_assignments: Dict[Tuple[str, int], str]):
         """事前バリデーションロジック"""
-        # [V1] 従業員名の存在チェック
         for (w, d) in fixed_assignments.keys():
             if w not in self.roster:
                 raise ShiftValidationError(f"固定シートにある従業員「{w}」は従業員一覧に存在しません。")
@@ -103,19 +112,16 @@ class ShiftOptimizer:
             if w not in self.roster:
                 raise ShiftValidationError(f"希望休シートにある従業員「{w}」は従業員一覧に存在しません。")
 
-        # [V2] 日付の範囲チェック
         for (w, d) in list(fixed_assignments.keys()) + list(holiday_requests.keys()):
             if d < 1 or d > self.num_days:
                 raise ShiftValidationError(f"日付「{d}日」が{self.month}月の範囲を超えています。")
 
-        # [V4] 希望休と固定シフトの衝突チェック
         for (w, d), is_holiday in holiday_requests.items():
             if is_holiday and (w, d) in fixed_assignments:
                 fixed_s = fixed_assignments[(w, d)]
                 if self.shift_hours.get(fixed_s, 0) > 0:
                     raise ShiftValidationError(f"{w}さんは{d}日に「希望休」ですが、固定シートで「{fixed_s}」が指定され矛盾しています。")
 
-        # [V5] 固定ワーカー（末吉さん）のルールチェック
         for d in self.days:
             if (self.fixed_worker, d) in fixed_assignments:
                 s = fixed_assignments[(self.fixed_worker, d)]
@@ -124,7 +130,6 @@ class ShiftOptimizer:
                 if not self._is_weekend(d) and s in self.daily_required_shifts:
                     raise ShiftValidationError(f"固定ワーカー({self.fixed_worker})の平日({d}日)に一般シフト「{s}」が固定されています。隊長日勤にしてください。")
 
-        # [V7] 夜勤翌日の日勤制限チェック（当月内のチェック）
         night_shifts = ["A", "9B", "C"]
         for d in self.days[:-1]:
             for w in self.roster:
@@ -135,7 +140,6 @@ class ShiftOptimizer:
                         raise ShiftValidationError(f"{w}さんは{d}日に夜勤、翌{d+1}日に日勤が固定されており、夜勤明けルールに違反します。")
 
     def solve(self, holiday_requests: Dict[Tuple[str, int], bool], fixed_assignments: Dict[Tuple[str, int], str]) -> Tuple[str, Dict[Tuple[str, int], str]]:
-        # 事前チェック
         self.validate_inputs(holiday_requests, fixed_assignments)
 
         model = cp_model.CpModel()
@@ -148,23 +152,19 @@ class ShiftOptimizer:
                     x[w, d, s] = model.NewBoolVar(f"x_{w}_{d}_{s}")
 
         # --- 基本制約 ---
-        # 1人1日1シフト
         for w in self.roster:
             for d in self.days:
                 model.Add(sum(x[w, d, s] for s in self.all_shifts) == 1)
 
-        # 固定シートの反映
         for (w, d), s in fixed_assignments.items():
             if s in x:
                 model.Add(x[w, d, s] == 1)
 
-        # 希望休シートの反映
         for (w, d), is_holiday in holiday_requests.items():
-            if is_holiday:
-                if "○" in self.all_shifts:
-                    model.Add(x[w, d, "○"] == 1)
+            if is_holiday and "○" in self.all_shifts:
+                model.Add(x[w, d, "○"] == 1)
 
-        # --- 固定ワーカー（末吉さん）専用の自動アサイン制約 ---
+        # --- 固定ワーカー制約 ---
         for d in self.days:
             if (self.fixed_worker, d) not in fixed_assignments:
                 if self._is_weekend(d):
@@ -172,18 +172,16 @@ class ShiftOptimizer:
                 else:
                     model.Add(x[self.fixed_worker, d, "隊長日勤"] == 1)
 
-        # 一般スタッフは「隊長日勤」に入れない
         for w in self.shift_workers:
             for d in self.days:
                 model.Add(x[w, d, "隊長日勤"] == 0)
 
-        # --- 毎日の必要人数制約（一般シフトの充填） ---
+        # --- 毎日の必要人数制約 ---
         for d in self.days:
             for s in self.daily_required_shifts:
                 model.Add(sum(x[w, d, s] for w in self.shift_workers) == 1)
 
         # --- 労働基準・勤務健康ルール ---
-        # 1. 夜勤（A, 9B, C）の翌日は必ず休日（当月内）
         night_shifts = ["A", "9B", "C"]
         for w in self.shift_workers:
             for d in self.days[:-1]:
@@ -191,31 +189,27 @@ class ShiftOptimizer:
                 is_work_next = sum(x[w, d+1, s] for s in self.work_shifts)
                 model.Add(is_night + is_work_next <= 1)
 
-        # 【前月末との連動】 前月の最終日が夜勤だった場合、今月の1日は必ず休日（勤務シフトを禁止）
         for w in self.shift_workers:
             if w in self.prev_month_tail and len(self.prev_month_tail[w]) > 0:
-                last_shift_prev = self.prev_month_tail[w][-1]  # 前月の最後の日のシフト
+                last_shift_prev = self.prev_month_tail[w][-1]
                 if last_shift_prev in ["A", "9B", "C", "夜勤A", "夜勤B", "夜勤C"]:
-                    # 今月1日は働くシフト（実働>0）に入ってはならない
                     model.Add(sum(x[w, 1, s] for s in self.work_shifts) == 0)
 
-        # 連勤制限
         max_consecutive = self.constraints.get("連勤制限", 5)
         for w in self.shift_workers:
             for d in range(1, self.num_days - max_consecutive + 1):
                 model.Add(sum(x[w, d + i, s] for i in range(max_consecutive + 1) for s in self.work_shifts) <= max_consecutive)
 
-        # 週1休の保証（7日間スライディングウィンドウ）
         for w in self.shift_workers:
             for d in range(1, self.num_days - 6 + 1):
                 model.Add(sum(x[w, d + i, s] for i in range(7) for s in self.holiday_shifts) >= 1)
 
-        # --- 月間労働時間の「ぴったり調整」制約 ---
+        # --- 月間労働時間の調整制約 ---
         for w in self.shift_workers:
             total_hours = sum(x[w, d, s] * self.shift_hours[s] for d in self.days for s in self.all_shifts)
             model.Add(total_hours == self.target_hours)
 
-        # --- 目的関数の設定（夜勤配分の均等化） ---
+        # --- 目的関数の設定 ---
         night_counts = []
         for w in self.shift_workers:
             num_nights = model.NewIntVar(0, self.num_days, f"nights_{w}")
@@ -235,7 +229,6 @@ class ShiftOptimizer:
         
         status = solver.Solve(model)
 
-        # --- 結果の回収 ---
         result_schedule = {}
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             status_str = "OPTIMAL" if status == cp_model.OPTIMAL else "FEASIBLE"
@@ -246,7 +239,4 @@ class ShiftOptimizer:
                         if solver.Value(x[w, d, s]) == 1:
                             assigned_shift = s
                             break
-                    result_schedule[(w, d)] = assigned_shift
-            return status_str, result_schedule
-        else:
-            return "INFEASIBLE", {}
+                    result_schedule[(w,
