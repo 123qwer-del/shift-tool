@@ -1,5 +1,5 @@
 """
-警備員シフト最適化エンジン  v4.1 (互換性完全修正版)
+警備員シフト最適化エンジン  v4.2 (引数名エラー修正版)
 =================================================
 OR-Tools CP-SAT を使用した警備員シフトスケジューリング
 
@@ -28,19 +28,18 @@ def generate_shift(
     month: int,
     holiday_requests: Dict[Tuple[str, int], bool],
     fixed_assignments: Dict[Tuple[str, int], str],
-    settings_obj: Any
+    settings: Any  # ← ★ 画面側の引数名 'settings' に完全に一致させました
 ) -> Tuple[str, Dict[Tuple[str, int], str]]:
     """
-    [最重要] streamlit_app.py から直接呼び出される関数。
-    画面から渡された年、月、希望休、固定配置、設定オブジェクトを元に最適化を実行します。
+    [最重要] streamlit_app.py から直接呼び出されるエントリーポイント関数。
     """
     optimizer = ShiftOptimizer(
         year=year,
         month=month,
-        roster=settings_obj.roster,
-        fixed_worker=settings_obj.fixed_worker,
-        shift_hours=settings_obj.shift_hours,
-        constraints=settings_obj.constraints
+        roster=settings.roster,
+        fixed_worker=settings.fixed_worker,
+        shift_hours=settings.shift_hours,
+        constraints=settings.constraints
     )
     return optimizer.solve(holiday_requests, fixed_assignments)
 
