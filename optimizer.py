@@ -1,5 +1,5 @@
 """
-警備員シフト最適化エンジン  v4.2 (引数名エラー修正版)
+警備員シフト最適化エンジン  v4.3 (前月連動エラー修正版)
 =================================================
 OR-Tools CP-SAT を使用した警備員シフトスケジューリング
 
@@ -15,7 +15,7 @@ OR-Tools CP-SAT を使用した警備員シフトスケジューリング
 """
 
 import calendar
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 from ortools.sat.python import cp_model
 
 class ShiftValidationError(Exception):
@@ -28,7 +28,8 @@ def generate_shift(
     month: int,
     holiday_requests: Dict[Tuple[str, int], bool],
     fixed_assignments: Dict[Tuple[str, int], str],
-    settings: Any  # ← ★ 画面側の引数名 'settings' に完全に一致させました
+    settings: Any,
+    prev_month_tail: Optional[Dict[str, List[str]]] = None  # ← ★ 画面側から渡される前月末のシフトデータを安全に受け取ります
 ) -> Tuple[str, Dict[Tuple[str, int], str]]:
     """
     [最重要] streamlit_app.py から直接呼び出されるエントリーポイント関数。
@@ -39,19 +40,30 @@ def generate_shift(
         roster=settings.roster,
         fixed_worker=settings.fixed_worker,
         shift_hours=settings.shift_hours,
-        constraints=settings.constraints
+        constraints=settings.constraints,
+        prev_month_tail=prev_month_tail
     )
     return optimizer.solve(holiday_requests, fixed_assignments)
 
 
 class ShiftOptimizer:
-    def __init__(self, year: int, month: int, roster: List[str], fixed_worker: str, shift_hours: Dict[str, int], constraints: Dict[str, int]):
+    def __init__(
+        self, 
+        year: int, 
+        month: int, 
+        roster: List[str], 
+        fixed_worker: str, 
+        shift_hours: Dict[str, int], 
+        constraints: Dict[str, int],
+        prev_month_tail: Optional[Dict[str, List[str]]] = None
+    ):
         self.year = year
         self.month = month
         self.roster = roster
         self.fixed_worker = fixed_worker
         self.shift_hours = shift_hours
         self.constraints = constraints
+        self.prev_month_tail = prev_month_tail if prev_month_tail is not None else {}
         
         # 月の日数を取得
         _, self.num_days = calendar.monthrange(year, month)
@@ -112,7 +124,7 @@ class ShiftOptimizer:
                 if not self._is_weekend(d) and s in self.daily_required_shifts:
                     raise ShiftValidationError(f"固定ワーカー({self.fixed_worker})の平日({d}日)に一般シフト「{s}」が固定されています。隊長日勤にしてください。")
 
-        # [V7] 夜勤翌日の日勤制限チェック
+        # [V7] 夜勤翌日の日勤制限チェック（当月内のチェック）
         night_shifts = ["A", "9B", "C"]
         for d in self.days[:-1]:
             for w in self.roster:
@@ -149,7 +161,6 @@ class ShiftOptimizer:
         # 希望休シートの反映
         for (w, d), is_holiday in holiday_requests.items():
             if is_holiday:
-                # 希望休の日は公休「○」を割り当てる
                 if "○" in self.all_shifts:
                     model.Add(x[w, d, "○"] == 1)
 
@@ -157,9 +168,9 @@ class ShiftOptimizer:
         for d in self.days:
             if (self.fixed_worker, d) not in fixed_assignments:
                 if self._is_weekend(d):
-                    model.Add(x[self.fixed_worker, d, "○"] == 1)  # 土日は公休
+                    model.Add(x[self.fixed_worker, d, "○"] == 1)
                 else:
-                    model.Add(x[self.fixed_worker, d, "隊長日勤"] == 1)  # 平日は隊長日勤
+                    model.Add(x[self.fixed_worker, d, "隊長日勤"] == 1)
 
         # 一般スタッフは「隊長日勤」に入れない
         for w in self.shift_workers:
@@ -172,13 +183,21 @@ class ShiftOptimizer:
                 model.Add(sum(x[w, d, s] for w in self.shift_workers) == 1)
 
         # --- 労働基準・勤務健康ルール ---
-        # 夜勤（A, 9B, C）の翌日は必ず休日（○, △, ◎, 年休）
+        # 1. 夜勤（A, 9B, C）の翌日は必ず休日（当月内）
         night_shifts = ["A", "9B", "C"]
         for w in self.shift_workers:
             for d in self.days[:-1]:
                 is_night = sum(x[w, d, s] for s in night_shifts)
                 is_work_next = sum(x[w, d+1, s] for s in self.work_shifts)
                 model.Add(is_night + is_work_next <= 1)
+
+        # 【前月末との連動】 前月の最終日が夜勤だった場合、今月の1日は必ず休日（勤務シフトを禁止）
+        for w in self.shift_workers:
+            if w in self.prev_month_tail and len(self.prev_month_tail[w]) > 0:
+                last_shift_prev = self.prev_month_tail[w][-1]  # 前月の最後の日のシフト
+                if last_shift_prev in ["A", "9B", "C", "夜勤A", "夜勤B", "夜勤C"]:
+                    # 今月1日は働くシフト（実働>0）に入ってはならない
+                    model.Add(sum(x[w, 1, s] for s in self.work_shifts) == 0)
 
         # 連勤制限
         max_consecutive = self.constraints.get("連勤制限", 5)
